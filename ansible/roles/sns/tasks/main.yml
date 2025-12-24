@@ -1,0 +1,13 @@
+- name: Create SNS topic
+  amazon.aws.sns_topic:
+    name: "{{ sns_topic_name }}"
+    region: "{{ region }}"
+  register: sns_topic
+
+- name: Subscribe emails
+  amazon.aws.sns_topic_subscription:
+    topic_arn: "{{ sns_topic.topic_arn }}"
+    protocol: email
+    endpoint: "{{ item }}"
+    region: "{{ region }}"
+  loop: "{{ email_subscriptions }}"
