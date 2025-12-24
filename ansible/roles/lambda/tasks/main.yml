@@ -1,0 +1,9 @@
+- name: Deploy Lambda
+  amazon.aws.lambda:
+    name: "{{ lambda_name }}"
+    runtime: python3.11
+    role: "{{ lambda_role_name }}"
+    handler: s3_sns_email_lambda.lambda_handler
+    zip_file: "../../lambda/lambda.zip"
+    environment_variables:
+      SNS_TOPIC_ARN: "{{ sns_topic.topic_arn }}"
