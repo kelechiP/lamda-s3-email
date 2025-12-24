@@ -1,0 +1,12 @@
+- hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - "../environments/{{ ENV_NAME }}/vars.yml"
+
+  roles:
+    - s3
+    - sns
+    - iam
+    - lambda
+    - trigger
