@@ -1,0 +1,15 @@
+- name: Allow S3 invoke Lambda
+  amazon.aws.lambda_permission:
+    function_name: "{{ lambda_name }}"
+    action: lambda:InvokeFunction
+    principal: s3.amazonaws.com
+    source_arn: "arn:aws:s3:::{{ s3_bucket_name }}"
+    statement_id: s3invoke
+
+- name: Configure S3 trigger
+  amazon.aws.s3_bucket_notification:
+    bucket: "{{ s3_bucket_name }}"
+    lambda_function:
+      - lambda_function_arn: "{{ lambda_arn }}"
+        events: ["s3:ObjectCreated:Put"]
+        filter_suffix: ".txt"
