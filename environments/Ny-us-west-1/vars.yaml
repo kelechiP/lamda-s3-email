@@ -1,0 +1,11 @@
+env_name: ny
+region: us-west-1
+
+s3_bucket_name: ny-alert-files-bucket
+sns_topic_name: ny-s3-file-email-topic
+
+lambda_name: ny-s3-sns-email
+lambda_role_name: ny-lambda-s3-sns-role
+
+email_subscriptions:
+  - test.user@example.com
