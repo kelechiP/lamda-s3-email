@@ -1,0 +1,148 @@
+- name: Deploy S3-Lambda-SNS Email Automation
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - "environments/vars.yml"
+
+  tasks:
+
+    # ------------------------
+    # S3
+    # ------------------------
+    - name: Create S3 bucket if not exists
+      ansible.builtin.shell: |
+        aws s3api create-bucket \
+        --bucket {{ s3_bucket_name }} \
+        --region {{ region }} \
+        {% if region != 'us-east-1' %} \
+        --create-bucket-configuration LocationConstraint={{ region }} \
+        {% endif %}
+      args:
+        warn: false
+      register: s3_create
+      failed_when: false
+
+    # ------------------------
+    # IAM
+    # ------------------------
+    - name: Create Lambda IAM role
+      ansible.builtin.shell: |
+        aws iam create-role \
+        --role-name {{ lambda_role_name }} \
+        --assume-role-policy-document '{
+          "Version":"2012-10-17",
+          "Statement":[{
+            "Effect":"Allow",
+            "Principal":{"Service":"lambda.amazonaws.com"},
+            "Action":"sts:AssumeRole"
+          }]
+        }'
+      args:
+        warn: false
+      failed_when: false
+      register: iam_role_create
+
+    - name: Attach basic execution policy to Lambda role
+      ansible.builtin.shell: |
+        aws iam attach-role-policy \
+        --role-name {{ lambda_role_name }} \
+        --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      args:
+        warn: false
+      failed_when: false
+
+    # ------------------------
+    # Lambda Packaging
+    # ------------------------
+    - name: Package Lambda handler into handler.zip
+      ansible.builtin.shell: |
+        cd environments &&
+        zip -r ../handler.zip handler.py
+      args:
+        warn: false
+        executable: /bin/bash
+
+    - name: Create Lambda function
+      ansible.builtin.shell: |
+        aws lambda create-function \
+        --function-name {{ lambda_name }} \
+        --runtime python3.11 \
+        --role arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }} \
+        --handler handler.lambda_handler \
+        --zip-file fileb://handler.zip \
+        --region {{ region }}
+      args:
+        warn: false
+      failed_when: false
+      register: lambda_create
+
+    - name: Get Lambda function ARN
+      ansible.builtin.shell: |
+        aws lambda get-function \
+        --function-name {{ lambda_name }} \
+        --region {{ region }}
+      register: lambda_info
+      args:
+        warn: false
+
+    - name: Set Lambda ARN fact
+      ansible.builtin.set_fact:
+        lambda_arn: "{{ (lambda_info.stdout | from_json).Configuration.FunctionArn }}"
+
+    # ------------------------
+    # SNS
+    # ------------------------
+    - name: Create SNS topic
+      ansible.builtin.shell: |
+        aws sns create-topic \
+        --name {{ sns_topic_name }} \
+        --region {{ region }}
+      register: sns_out
+      args:
+        warn: false
+
+    - name: Set SNS topic ARN fact
+      ansible.builtin.set_fact:
+        sns_topic_arn: "{{ (sns_out.stdout | from_json).TopicArn }}"
+
+    - name: Subscribe email addresses to SNS topic
+      ansible.builtin.shell: |
+        aws sns subscribe \
+        --topic-arn {{ sns_topic_arn }} \
+        --protocol email \
+        --notification-endpoint {{ item }} \
+        --region {{ region }}
+      loop: "{{ email_subscriptions }}"
+      args:
+        warn: false
+
+    # ------------------------
+    # S3 Trigger for Lambda
+    # ------------------------
+    - name: Grant S3 permission to invoke Lambda
+      ansible.builtin.shell: |
+        aws lambda add-permission \
+        --function-name {{ lambda_name }} \
+        --statement-id s3invoke \
+        --action lambda:InvokeFunction \
+        --principal s3.amazonaws.com \
+        --source-arn arn:aws:s3:::{{ s3_bucket_name }} \
+        --region {{ region }}
+      args:
+        warn: false
+      failed_when: false
+
+    - name: Configure S3 bucket notification to trigger Lambda
+      ansible.builtin.shell: |
+        aws s3api put-bucket-notification-configuration \
+        --bucket {{ s3_bucket_name }} \
+        --notification-configuration '{
+          "LambdaFunctionConfigurations":[{
+            "LambdaFunctionArn":"{{ lambda_arn }}",
+            "Events":["s3:ObjectCreated:Put"],
+            "Filter":{"Key":{"FilterRules":[{"Name":"suffix","Value":".txt"}]}}
+          }]
+        }'
+      args:
+        warn: false
