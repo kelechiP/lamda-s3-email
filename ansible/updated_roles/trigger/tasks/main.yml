@@ -3,11 +3,41 @@
   command: >
     aws lambda add-permission
     --function-name {{ lambda_name }}
-    --statement-id s3-invoke
+    --statement-id s3invoke
     --action lambda:InvokeFunction
     --principal s3.amazonaws.com
     --source-arn arn:aws:s3:::{{ s3_bucket_name }}
     --region {{ region }}
   register: lambda_permission
-  changed_when: lambda_permission.rc == 0
   failed_when: false
+  changed_when: "'Statement' in lambda_permission.stdout"
+
+- name: Create S3 notification configuration file
+  copy:
+    dest: /tmp/s3_notification.json
+    content: |
+      {
+        "LambdaFunctionConfigurations": [
+          {
+            "LambdaFunctionArn": "{{ lambda_arn }}",
+            "Events": ["s3:ObjectCreated:Put"],
+            "Filter": {
+              "Key": {
+                "FilterRules": [
+                  {
+                    "Name": "suffix",
+                    "Value": ".txt"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+
+- name: Configure S3 bucket notification
+  command: >
+    aws s3api put-bucket-notification-configuration
+    --bucket {{ s3_bucket_name }}
+    --notification-configuration file:///tmp/s3_notification.json
+    --region {{ region }}
