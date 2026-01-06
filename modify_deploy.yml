@@ -12,11 +12,10 @@
     # ------------------------
     - name: Create S3 bucket if not exists
       ansible.builtin.shell: |
-        aws s3api head-bucket --bucket {{ s3_bucket_name }} 2>/dev/null || \
-        aws s3api create-bucket \
-          --bucket {{ s3_bucket_name }} \
-          --region {{ region }} \
+        if ! aws s3api head-bucket --bucket {{ s3_bucket_name }} 2>/dev/null; then
+          aws s3api create-bucket --bucket {{ s3_bucket_name }} --region {{ region }} \
           {% if region != 'us-east-1' %} --create-bucket-configuration LocationConstraint={{ region }} {% endif %}
+        fi
       args:
         warn: false
         executable: /bin/bash
@@ -29,9 +28,8 @@
     # ------------------------
     - name: Create Lambda IAM role if not exists
       ansible.builtin.shell: |
-        aws iam get-role --role-name {{ lambda_role_name }} >/dev/null 2>&1 || \
-        aws iam create-role \
-          --role-name {{ lambda_role_name }} \
+        if ! aws iam get-role --role-name {{ lambda_role_name }} >/dev/null 2>&1; then
+          aws iam create-role --role-name {{ lambda_role_name }} \
           --assume-role-policy-document '{
             "Version":"2012-10-17",
             "Statement":[{
@@ -40,6 +38,7 @@
               "Action":"sts:AssumeRole"
             }]
           }'
+        fi
       args:
         warn: false
         executable: /bin/bash
@@ -47,12 +46,12 @@
       changed_when: "'create-role' in iam_role_create.stdout or 'CreateRole' in iam_role_create.stdout"
       failed_when: false
 
-    - name: Attach basic execution policy to Lambda role
+    - name: Attach basic execution policy to Lambda role if not attached
       ansible.builtin.shell: |
-        aws iam list-attached-role-policies --role-name {{ lambda_role_name }} | grep AWSLambdaBasicExecutionRole >/dev/null || \
-        aws iam attach-role-policy \
-          --role-name {{ lambda_role_name }} \
+        if ! aws iam list-attached-role-policies --role-name {{ lambda_role_name }} | grep AWSLambdaBasicExecutionRole >/dev/null; then
+          aws iam attach-role-policy --role-name {{ lambda_role_name }} \
           --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        fi
       args:
         warn: false
         executable: /bin/bash
@@ -64,8 +63,7 @@
     # ------------------------
     - name: Package Lambda handler into handler.zip
       ansible.builtin.shell: |
-        cd environments &&
-        zip -r ../handler.zip handler.py
+        cd environments && zip -r ../handler.zip handler.py
       args:
         warn: false
         executable: /bin/bash
@@ -73,14 +71,15 @@
 
     - name: Create Lambda function if not exists
       ansible.builtin.shell: |
-        aws lambda get-function --function-name {{ lambda_name }} >/dev/null 2>&1 || \
-        aws lambda create-function \
+        if ! aws lambda get-function --function-name {{ lambda_name }} >/dev/null 2>&1; then
+          aws lambda create-function \
           --function-name {{ lambda_name }} \
           --runtime python3.11 \
           --role arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }} \
           --handler handler.lambda_handler \
           --zip-file fileb://handler.zip \
           --region {{ region }}
+        fi
       args:
         warn: false
         executable: /bin/bash
@@ -105,8 +104,9 @@
     # ------------------------
     - name: Create SNS topic if not exists
       ansible.builtin.shell: |
-        aws sns list-topics --region {{ region }} | grep {{ sns_topic_name }} >/dev/null || \
-        aws sns create-topic --name {{ sns_topic_name }} --region {{ region }}
+        if ! aws sns list-topics --region {{ region }} | grep {{ sns_topic_name }} >/dev/null; then
+          aws sns create-topic --name {{ sns_topic_name }} --region {{ region }}
+        fi
       register: sns_out
       args:
         warn: false
@@ -120,10 +120,9 @@
     - name: Subscribe email addresses to SNS topic if not subscribed
       ansible.builtin.shell: |
         for email in {{ email_subscriptions | join(' ') }}; do
-          aws sns list-subscriptions-by-topic --topic-arn {{ sns_topic_arn }} \
-            | grep $email >/dev/null || \
-          aws sns subscribe --topic-arn {{ sns_topic_arn }} --protocol email \
-            --notification-endpoint $email --region {{ region }}
+          if ! aws sns list-subscriptions-by-topic --topic-arn {{ sns_topic_arn }} | grep $email >/dev/null; then
+            aws sns subscribe --topic-arn {{ sns_topic_arn }} --protocol email --notification-endpoint $email --region {{ region }}
+          fi
         done
       args:
         warn: false
@@ -135,14 +134,15 @@
     # ------------------------
     - name: Grant S3 permission to invoke Lambda if not exists
       ansible.builtin.shell: |
-        aws lambda get-policy --function-name {{ lambda_name }} 2>/dev/null | grep s3invoke >/dev/null || \
-        aws lambda add-permission \
+        if ! aws lambda get-policy --function-name {{ lambda_name }} 2>/dev/null | grep s3invoke >/dev/null; then
+          aws lambda add-permission \
           --function-name {{ lambda_name }} \
           --statement-id s3invoke \
           --action lambda:InvokeFunction \
           --principal s3.amazonaws.com \
           --source-arn arn:aws:s3:::{{ s3_bucket_name }} \
           --region {{ region }}
+        fi
       args:
         warn: false
         executable: /bin/bash
