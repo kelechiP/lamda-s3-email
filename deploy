@@ -1,0 +1,127 @@
+- hosts: localhost
+  gather_facts: false
+
+  vars:
+    env_name: "{{ lookup('env', 'ENV_NAME') | default('NY-us-west-1', true) }}"
+
+  vars_files:
+    - "environments/{{ env_name }}/vars.yml"
+
+  tasks:
+
+    # ------------------------
+    # S3
+    # ------------------------
+    - name: Create S3 bucket
+      command: >
+        aws s3api create-bucket
+        --bucket {{ s3_bucket_name }}
+        --region {{ region }}
+        {% if region != 'us-east-1' %}
+        --create-bucket-configuration LocationConstraint={{ region }}
+        {% endif %}
+      failed_when: false
+
+    # ------------------------
+    # IAM
+    # ------------------------
+    - name: Create IAM role
+      command: >
+        aws iam create-role
+        --role-name {{ lambda_role_name }}
+        --assume-role-policy-document '{
+          "Version":"2012-10-17",
+          "Statement":[{
+            "Effect":"Allow",
+            "Principal":{"Service":"lambda.amazonaws.com"},
+            "Action":"sts:AssumeRole"
+          }]
+        }'
+      failed_when: false
+
+    - name: Attach basic Lambda policy
+      command: >
+        aws iam attach-role-policy
+        --role-name {{ lambda_role_name }}
+        --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      failed_when: false
+
+    # ------------------------
+    # LAMBDA
+    # ------------------------
+    - name: Package Lambda
+      command: >
+        cd environments/{{ env_name }}/lambda &&
+        zip -r ../../../lambda.zip .
+      args:
+        executable: /bin/bash
+
+    - name: Create Lambda function
+      command: >
+        aws lambda create-function
+        --function-name {{ lambda_name }}
+        --runtime python3.11
+        --role arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }}
+        --handler handler.lambda_handler
+        --zip-file fileb://lambda.zip
+        --region {{ region }}
+      failed_when: false
+      register: lambda_create
+
+    - name: Get Lambda ARN
+      command: >
+        aws lambda get-function
+        --function-name {{ lambda_name }}
+        --region {{ region }}
+      register: lambda_info
+
+    - set_fact:
+        lambda_arn: "{{ (lambda_info.stdout | from_json).Configuration.FunctionArn }}"
+
+    # ------------------------
+    # SNS
+    # ------------------------
+    - name: Create SNS topic
+      command: >
+        aws sns create-topic
+        --name {{ sns_topic_name }}
+        --region {{ region }}
+      register: sns_out
+
+    - set_fact:
+        sns_topic_arn: "{{ (sns_out.stdout | from_json).TopicArn }}"
+
+    - name: Subscribe emails
+      command: >
+        aws sns subscribe
+        --topic-arn {{ sns_topic_arn }}
+        --protocol email
+        --notification-endpoint {{ item }}
+        --region {{ region }}
+      loop: "{{ email_subscriptions }}"
+
+    # ------------------------
+    # TRIGGERS
+    # ------------------------
+    - name: Allow S3 to invoke Lambda
+      command: >
+        aws lambda add-permission
+        --function-name {{ lambda_name }}
+        --statement-id s3invoke
+        --action lambda:InvokeFunction
+        --principal s3.amazonaws.com
+        --source-arn arn:aws:s3:::{{ s3_bucket_name }}
+        --region {{ region }}
+      failed_when: false
+
+    - name: Configure S3 notification
+      command: >
+        aws s3api put-bucket-notification-configuration
+        --bucket {{ s3_bucket_name }}
+        --notification-configuration '{
+          "LambdaFunctionConfigurations":[{
+            "LambdaFunctionArn":"{{ lambda_arn }}",
+            "Events":["s3:ObjectCreated:Put"],
+            "Filter":{"Key":{"FilterRules":[{"Name":"suffix","Value":".txt"}]}}
+          }]
+        }'
