@@ -1,0 +1,16 @@
+---
+- name: Create IAM role
+  command: >
+    aws iam create-role
+    --role-name {{ lambda_role_name }}
+    --assume-role-policy-document file://ansible/roles/iam/files/trust-policy.json
+  register: iam_role
+  changed_when: iam_role.rc == 0
+  failed_when: false
+
+- name: Attach policies
+  command: >
+    aws iam attach-role-policy
+    --role-name {{ lambda_role_name }}
+    --policy-arn {{ item }}
+  loop: "{{ lambda_policy_arns }}"
