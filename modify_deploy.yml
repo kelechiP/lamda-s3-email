@@ -1,0 +1,166 @@
+- name: Deploy S3-Lambda-SNS Email Automation
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - "environments/vars.yml"
+
+  tasks:
+
+    # ------------------------
+    # S3
+    # ------------------------
+    - name: Create S3 bucket if not exists
+      ansible.builtin.shell: |
+        aws s3api head-bucket --bucket {{ s3_bucket_name }} 2>/dev/null || \
+        aws s3api create-bucket \
+          --bucket {{ s3_bucket_name }} \
+          --region {{ region }} \
+          {% if region != 'us-east-1' %} --create-bucket-configuration LocationConstraint={{ region }} {% endif %}
+      args:
+        warn: false
+        executable: /bin/bash
+      register: s3_create
+      changed_when: "'create-bucket' in s3_create.stdout or 'Created' in s3_create.stdout"
+      failed_when: false
+
+    # ------------------------
+    # IAM
+    # ------------------------
+    - name: Create Lambda IAM role if not exists
+      ansible.builtin.shell: |
+        aws iam get-role --role-name {{ lambda_role_name }} >/dev/null 2>&1 || \
+        aws iam create-role \
+          --role-name {{ lambda_role_name }} \
+          --assume-role-policy-document '{
+            "Version":"2012-10-17",
+            "Statement":[{
+              "Effect":"Allow",
+              "Principal":{"Service":"lambda.amazonaws.com"},
+              "Action":"sts:AssumeRole"
+            }]
+          }'
+      args:
+        warn: false
+        executable: /bin/bash
+      register: iam_role_create
+      changed_when: "'create-role' in iam_role_create.stdout or 'CreateRole' in iam_role_create.stdout"
+      failed_when: false
+
+    - name: Attach basic execution policy to Lambda role
+      ansible.builtin.shell: |
+        aws iam list-attached-role-policies --role-name {{ lambda_role_name }} | grep AWSLambdaBasicExecutionRole >/dev/null || \
+        aws iam attach-role-policy \
+          --role-name {{ lambda_role_name }} \
+          --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      args:
+        warn: false
+        executable: /bin/bash
+      changed_when: "'attach-role-policy' in stdout or 'Attach' in stdout"
+      failed_when: false
+
+    # ------------------------
+    # Lambda Packaging
+    # ------------------------
+    - name: Package Lambda handler into handler.zip
+      ansible.builtin.shell: |
+        cd environments &&
+        zip -r ../handler.zip handler.py
+      args:
+        warn: false
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Create Lambda function if not exists
+      ansible.builtin.shell: |
+        aws lambda get-function --function-name {{ lambda_name }} >/dev/null 2>&1 || \
+        aws lambda create-function \
+          --function-name {{ lambda_name }} \
+          --runtime python3.11 \
+          --role arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }} \
+          --handler handler.lambda_handler \
+          --zip-file fileb://handler.zip \
+          --region {{ region }}
+      args:
+        warn: false
+        executable: /bin/bash
+      register: lambda_create
+      changed_when: "'create-function' in lambda_create.stdout or 'CreateFunction' in lambda_create.stdout"
+      failed_when: false
+
+    - name: Get Lambda function ARN
+      ansible.builtin.shell: |
+        aws lambda get-function --function-name {{ lambda_name }} --region {{ region }}
+      register: lambda_info
+      args:
+        warn: false
+        executable: /bin/bash
+
+    - name: Set Lambda ARN fact
+      ansible.builtin.set_fact:
+        lambda_arn: "{{ (lambda_info.stdout | from_json).Configuration.FunctionArn }}"
+
+    # ------------------------
+    # SNS
+    # ------------------------
+    - name: Create SNS topic if not exists
+      ansible.builtin.shell: |
+        aws sns list-topics --region {{ region }} | grep {{ sns_topic_name }} >/dev/null || \
+        aws sns create-topic --name {{ sns_topic_name }} --region {{ region }}
+      register: sns_out
+      args:
+        warn: false
+        executable: /bin/bash
+      changed_when: "'create-topic' in sns_out.stdout or 'CreateTopic' in sns_out.stdout"
+
+    - name: Set SNS topic ARN fact
+      ansible.builtin.set_fact:
+        sns_topic_arn: "{{ (sns_out.stdout | from_json).TopicArn }}"
+
+    - name: Subscribe email addresses to SNS topic if not subscribed
+      ansible.builtin.shell: |
+        for email in {{ email_subscriptions | join(' ') }}; do
+          aws sns list-subscriptions-by-topic --topic-arn {{ sns_topic_arn }} \
+            | grep $email >/dev/null || \
+          aws sns subscribe --topic-arn {{ sns_topic_arn }} --protocol email \
+            --notification-endpoint $email --region {{ region }}
+        done
+      args:
+        warn: false
+        executable: /bin/bash
+      changed_when: true
+
+    # ------------------------
+    # S3 Trigger for Lambda
+    # ------------------------
+    - name: Grant S3 permission to invoke Lambda if not exists
+      ansible.builtin.shell: |
+        aws lambda get-policy --function-name {{ lambda_name }} 2>/dev/null | grep s3invoke >/dev/null || \
+        aws lambda add-permission \
+          --function-name {{ lambda_name }} \
+          --statement-id s3invoke \
+          --action lambda:InvokeFunction \
+          --principal s3.amazonaws.com \
+          --source-arn arn:aws:s3:::{{ s3_bucket_name }} \
+          --region {{ region }}
+      args:
+        warn: false
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false
+
+    - name: Configure S3 bucket notification to trigger Lambda
+      ansible.builtin.shell: |
+        aws s3api put-bucket-notification-configuration \
+        --bucket {{ s3_bucket_name }} \
+        --notification-configuration '{
+          "LambdaFunctionConfigurations":[{
+            "LambdaFunctionArn":"{{ lambda_arn }}",
+            "Events":["s3:ObjectCreated:Put"],
+            "Filter":{"Key":{"FilterRules":[{"Name":"suffix","Value":".txt"}]}}
+          }]
+        }'
+      args:
+        warn: false
+        executable: /bin/bash
+      changed_when: true
