@@ -1,0 +1,13 @@
+---
+- name: Allow S3 to invoke Lambda
+  command: >
+    aws lambda add-permission
+    --function-name {{ lambda_name }}
+    --statement-id s3-invoke
+    --action lambda:InvokeFunction
+    --principal s3.amazonaws.com
+    --source-arn arn:aws:s3:::{{ s3_bucket_name }}
+    --region {{ region }}
+  register: lambda_permission
+  changed_when: lambda_permission.rc == 0
+  failed_when: false
