@@ -1,0 +1,13 @@
+---
+- name: Create Lambda function
+  command: >
+    aws lambda create-function
+    --function-name {{ lambda_name }}
+    --runtime python3.11
+    --role arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }}
+    --handler s3_sns_email_lambda.lambda_handler
+    --zip-file fileb://lambda.zip
+    --region {{ region }}
+  register: lambda_create
+  changed_when: lambda_create.rc == 0
+  failed_when: false
