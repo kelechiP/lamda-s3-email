@@ -1,0 +1,206 @@
+---
+- name: Deploy S3 → Lambda → SNS Email Automation
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - "environments/{{ env_name }}/vars.yaml"
+
+  tasks:
+
+    # ------------------------
+    # PRECHECKS
+    # ------------------------
+
+    - name: Verify AWS CLI is installed
+      ansible.builtin.command: aws --version
+      register: aws_cli_check
+      changed_when: false
+      failed_when: aws_cli_check.rc != 0
+
+    # ------------------------
+    # S3
+    # ------------------------
+
+    - name: Check if S3 bucket exists
+      ansible.builtin.command: >
+        aws s3api head-bucket
+        --bucket {{ s3_bucket_name }}
+        --region {{ region }}
+      register: s3_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create S3 bucket if missing
+      ansible.builtin.command: >
+        aws s3api create-bucket
+        --bucket {{ s3_bucket_name }}
+        --region {{ region }}
+        --create-bucket-configuration LocationConstraint={{ region }}
+      when: s3_check.rc != 0
+
+    # ------------------------
+    # IAM ROLE
+    # ------------------------
+
+    - name: Check if IAM role exists
+      ansible.builtin.command: >
+        aws iam get-role
+        --role-name {{ lambda_role_name }}
+      register: iam_role_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create IAM role for Lambda
+      ansible.builtin.command: >
+        aws iam create-role
+        --role-name {{ lambda_role_name }}
+        --assume-role-policy-document file://ansible/roles/iam/files/{{ lambda_trust_policy_file }}
+      when: iam_role_check.rc != 0
+
+    - name: List attached IAM policies
+      ansible.builtin.command: >
+        aws iam list-attached-role-policies
+        --role-name {{ lambda_role_name }}
+        --query "AttachedPolicies[].PolicyArn"
+        --output text
+      register: attached_policies
+      changed_when: false
+
+    - name: Attach Lambda basic execution policy if missing
+      ansible.builtin.command: >
+        aws iam attach-role-policy
+        --role-name {{ lambda_role_name }}
+        --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      when: "'AWSLambdaBasicExecutionRole' not in attached_policies.stdout"
+
+    # ------------------------
+    # LAMBDA PACKAGE
+    # ------------------------
+
+    - name: Create build directory
+      ansible.builtin.file:
+        path: "{{ lambda_build_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy Lambda handler
+      ansible.builtin.copy:
+        src: "{{ handler_source_file }}"
+        dest: "{{ lambda_build_dir }}/handler.py"
+        mode: "0644"
+
+    - name: Create Lambda zip package
+      ansible.builtin.command: >
+        zip -r {{ lambda_zip_path }} handler.py
+      args:
+        chdir: "{{ lambda_build_dir }}"
+      changed_when: true
+
+    # ------------------------
+    # LAMBDA FUNCTION
+    # ------------------------
+
+    - name: Check if Lambda function exists
+      ansible.builtin.command: >
+        aws lambda get-function
+        --function-name {{ lambda_name }}
+        --region {{ region }}
+      register: lambda_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create Lambda function
+      ansible.builtin.command: >
+        aws lambda create-function
+        --function-name {{ lambda_name }}
+        --runtime {{ lambda_runtime }}
+        --role arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }}
+        --handler {{ lambda_handler }}
+        --zip-file fileb://{{ lambda_zip_path }}
+        --timeout {{ lambda_timeout }}
+        --memory-size {{ lambda_memory }}
+        --region {{ region }}
+      when: lambda_check.rc != 0
+
+    - name: Update Lambda function code
+      ansible.builtin.command: >
+        aws lambda update-function-code
+        --function-name {{ lambda_name }}
+        --zip-file fileb://{{ lambda_zip_path }}
+        --region {{ region }}
+      when: lambda_check.rc == 0
+
+    - name: Get Lambda ARN
+      ansible.builtin.command: >
+        aws lambda get-function
+        --function-name {{ lambda_name }}
+        --query "Configuration.FunctionArn"
+        --output text
+        --region {{ region }}
+      register: lambda_arn
+      changed_when: false
+
+    # ------------------------
+    # SNS
+    # ------------------------
+
+    - name: Create SNS topic
+      ansible.builtin.command: >
+        aws sns create-topic
+        --name {{ sns_topic_name }}
+        --region {{ region }}
+      register: sns_topic
+      changed_when: "'TopicArn' in sns_topic.stdout"
+
+    - name: Subscribe email endpoints
+      ansible.builtin.command: >
+        aws sns subscribe
+        --topic-arn {{ sns_topic.stdout | from_json | json_query('TopicArn') }}
+        --protocol email
+        --notification-endpoint {{ item }}
+        --region {{ region }}
+      loop: "{{ email_subscriptions }}"
+      changed_when: false
+
+    # ------------------------
+    # LAMBDA PERMISSION
+    # ------------------------
+
+    - name: Allow S3 to invoke Lambda
+      ansible.builtin.command: >
+        aws lambda add-permission
+        --function-name {{ lambda_name }}
+        --statement-id s3invoke
+        --action lambda:InvokeFunction
+        --principal s3.amazonaws.com
+        --source-arn arn:aws:s3:::{{ s3_bucket_name }}
+        --region {{ region }}
+      register: lambda_permission
+      failed_when: false
+      changed_when: "'Statement' in lambda_permission.stdout"
+
+    # ------------------------
+    # S3 NOTIFICATION
+    # ------------------------
+
+    - name: Configure S3 bucket notification
+      ansible.builtin.command: >
+        aws s3api put-bucket-notification-configuration
+        --bucket {{ s3_bucket_name }}
+        --notification-configuration '{
+          "LambdaFunctionConfigurations": [
+            {
+              "LambdaFunctionArn": "{{ lambda_arn.stdout }}",
+              "Events": ["s3:ObjectCreated:Put"],
+              "Filter": {
+                "Key": {
+                  "FilterRules": [
+                    { "Name": "suffix", "Value": "{{ s3_event_suffix }}" }
+                  ]
+                }
+              }
+            }
+          ]
+        }'
+      changed_when: true
