@@ -3,164 +3,196 @@
   gather_facts: false
 
   vars_files:
-    - "environments/vars.yml"
+    - environments/vars.yml
 
   tasks:
 
     # ------------------------
     # S3
     # ------------------------
-    - name: Create S3 bucket if not exists
+    - name: Ensure S3 bucket exists
       ansible.builtin.shell: |
-        if ! aws s3api head-bucket --bucket {{ s3_bucket_name }} 2>/dev/null; then
-          aws s3api create-bucket --bucket {{ s3_bucket_name }} --region {{ region }} \
-          {% if region != 'us-east-1' %} --create-bucket-configuration LocationConstraint={{ region }} {% endif %}
+        aws s3api head-bucket --bucket {{ s3_bucket_name }} >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+          aws s3api create-bucket \
+            --bucket {{ s3_bucket_name }} \
+            --region {{ region }}{% if region != 'us-east-1' %} \
+            --create-bucket-configuration LocationConstraint={{ region }}{% endif %}
+          echo "created"
+        else
+          echo "exists"
         fi
       args:
-        warn: false
         executable: /bin/bash
-      register: s3_create
-      changed_when: "'create-bucket' in s3_create.stdout or 'Created' in s3_create.stdout"
-      failed_when: false
+        warn: false
+      register: s3_bucket_result
+      changed_when: "'created' in s3_bucket_result.stdout"
 
     # ------------------------
     # IAM
     # ------------------------
-    - name: Create Lambda IAM role if not exists
+    - name: Ensure Lambda IAM role exists
       ansible.builtin.shell: |
-        if ! aws iam get-role --role-name {{ lambda_role_name }} >/dev/null 2>&1; then
-          aws iam create-role --role-name {{ lambda_role_name }} \
-          --assume-role-policy-document '{
-            "Version":"2012-10-17",
-            "Statement":[{
-              "Effect":"Allow",
-              "Principal":{"Service":"lambda.amazonaws.com"},
-              "Action":"sts:AssumeRole"
-            }]
-          }'
+        aws iam get-role --role-name {{ lambda_role_name }} >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+          aws iam create-role \
+            --role-name {{ lambda_role_name }} \
+            --assume-role-policy-document '{
+              "Version":"2012-10-17",
+              "Statement":[{
+                "Effect":"Allow",
+                "Principal":{"Service":"lambda.amazonaws.com"},
+                "Action":"sts:AssumeRole"
+              }]
+            }'
+          echo "created"
+        else
+          echo "exists"
         fi
       args:
-        warn: false
         executable: /bin/bash
-      register: iam_role_create
-      changed_when: "'create-role' in iam_role_create.stdout or 'CreateRole' in iam_role_create.stdout"
-      failed_when: false
+        warn: false
+      register: iam_role_result
+      changed_when: "'created' in iam_role_result.stdout"
 
-    - name: Attach basic execution policy to Lambda role if not attached
+    - name: Ensure Lambda basic execution policy attached
       ansible.builtin.shell: |
-        if ! aws iam list-attached-role-policies --role-name {{ lambda_role_name }} | grep AWSLambdaBasicExecutionRole >/dev/null; then
-          aws iam attach-role-policy --role-name {{ lambda_role_name }} \
+        aws iam list-attached-role-policies --role-name {{ lambda_role_name }} \
+          --query "AttachedPolicies[].PolicyArn" \
+          --output text | tr '\t' '\n'
+      args:
+        executable: /bin/bash
+        warn: false
+      register: attached_policies
+      changed_when: false
+
+    - name: Attach Lambda execution policy if missing
+      ansible.builtin.shell: |
+        aws iam attach-role-policy \
+          --role-name {{ lambda_role_name }} \
           --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-        fi
+      when: "'AWSLambdaBasicExecutionRole' not in attached_policies.stdout"
       args:
-        warn: false
         executable: /bin/bash
-      changed_when: "'attach-role-policy' in stdout or 'Attach' in stdout"
-      failed_when: false
+        warn: false
 
     # ------------------------
-    # Lambda Packaging
+    # Lambda Package
     # ------------------------
-    - name: Package Lambda handler into handler.zip
+    - name: Package Lambda handler
       ansible.builtin.shell: |
-        cd environments && zip -r ../handler.zip handler.py
+        cd environments
+        zip -r ../handler.zip handler.py
       args:
-        warn: false
         executable: /bin/bash
+        warn: false
       changed_when: true
 
-    - name: Create Lambda function if not exists
+    - name: Ensure Lambda function exists
       ansible.builtin.shell: |
-        if ! aws lambda get-function --function-name {{ lambda_name }} >/dev/null 2>&1; then
+        aws lambda get-function --function-name {{ lambda_name }} >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
           aws lambda create-function \
-          --function-name {{ lambda_name }} \
-          --runtime python3.11 \
-          --role arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }} \
-          --handler handler.lambda_handler \
-          --zip-file fileb://handler.zip \
-          --region {{ region }}
+            --function-name {{ lambda_name }} \
+            --runtime python3.11 \
+            --role arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }} \
+            --handler handler.lambda_handler \
+            --zip-file fileb://handler.zip \
+            --region {{ region }}
+          echo "created"
+        else
+          echo "exists"
         fi
       args:
-        warn: false
         executable: /bin/bash
-      register: lambda_create
-      changed_when: "'create-function' in lambda_create.stdout or 'CreateFunction' in lambda_create.stdout"
-      failed_when: false
+        warn: false
+      register: lambda_create_result
+      changed_when: "'created' in lambda_create_result.stdout"
 
-    - name: Get Lambda function ARN
+    - name: Get Lambda ARN
       ansible.builtin.shell: |
-        aws lambda get-function --function-name {{ lambda_name }} --region {{ region }}
-      register: lambda_info
+        aws lambda get-function \
+          --function-name {{ lambda_name }} \
+          --query 'Configuration.FunctionArn' \
+          --output text \
+          --region {{ region }}
       args:
-        warn: false
         executable: /bin/bash
+        warn: false
+      register: lambda_arn_result
+      changed_when: false
 
     - name: Set Lambda ARN fact
       ansible.builtin.set_fact:
-        lambda_arn: "{{ (lambda_info.stdout | from_json).Configuration.FunctionArn }}"
+        lambda_arn: "{{ lambda_arn_result.stdout }}"
 
     # ------------------------
     # SNS
     # ------------------------
-    - name: Create SNS topic if not exists
+    - name: Ensure SNS topic exists
       ansible.builtin.shell: |
-        if ! aws sns list-topics --region {{ region }} | grep {{ sns_topic_name }} >/dev/null; then
-          aws sns create-topic --name {{ sns_topic_name }} --region {{ region }}
-        fi
-      register: sns_out
+        aws sns create-topic \
+          --name {{ sns_topic_name }} \
+          --region {{ region }}
       args:
-        warn: false
         executable: /bin/bash
-      changed_when: "'create-topic' in sns_out.stdout or 'CreateTopic' in sns_out.stdout"
+        warn: false
+      register: sns_topic_result
+      changed_when: "'TopicArn' in sns_topic_result.stdout"
 
     - name: Set SNS topic ARN fact
       ansible.builtin.set_fact:
-        sns_topic_arn: "{{ (sns_out.stdout | from_json).TopicArn }}"
+        sns_topic_arn: "{{ (sns_topic_result.stdout | from_json).TopicArn }}"
 
-    - name: Subscribe email addresses to SNS topic if not subscribed
+    - name: Ensure SNS email subscriptions exist
       ansible.builtin.shell: |
-        for email in {{ email_subscriptions | join(' ') }}; do
-          if ! aws sns list-subscriptions-by-topic --topic-arn {{ sns_topic_arn }} | grep $email >/dev/null; then
-            aws sns subscribe --topic-arn {{ sns_topic_arn }} --protocol email --notification-endpoint $email --region {{ region }}
-          fi
-        done
+        aws sns subscribe \
+          --topic-arn {{ sns_topic_arn }} \
+          --protocol email \
+          --notification-endpoint {{ item }} \
+          --region {{ region }}
+      loop: "{{ email_subscriptions }}"
       args:
-        warn: false
         executable: /bin/bash
+        warn: false
       changed_when: true
 
     # ------------------------
-    # S3 Trigger for Lambda
+    # S3 → Lambda Trigger
     # ------------------------
-    - name: Grant S3 permission to invoke Lambda if not exists
+    - name: Ensure S3 permission exists for Lambda
       ansible.builtin.shell: |
-        if ! aws lambda get-policy --function-name {{ lambda_name }} 2>/dev/null | grep s3invoke >/dev/null; then
+        aws lambda get-policy --function-name {{ lambda_name }} >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
           aws lambda add-permission \
-          --function-name {{ lambda_name }} \
-          --statement-id s3invoke \
-          --action lambda:InvokeFunction \
-          --principal s3.amazonaws.com \
-          --source-arn arn:aws:s3:::{{ s3_bucket_name }} \
-          --region {{ region }}
+            --function-name {{ lambda_name }} \
+            --statement-id s3invoke \
+            --action lambda:InvokeFunction \
+            --principal s3.amazonaws.com \
+            --source-arn arn:aws:s3:::{{ s3_bucket_name }} \
+            --region {{ region }}
+          echo "added"
+        else
+          echo "exists"
         fi
       args:
-        warn: false
         executable: /bin/bash
-      changed_when: true
-      failed_when: false
+        warn: false
+      register: lambda_permission_result
+      changed_when: "'added' in lambda_permission_result.stdout"
 
-    - name: Configure S3 bucket notification to trigger Lambda
+    - name: Configure S3 notification for Lambda
       ansible.builtin.shell: |
         aws s3api put-bucket-notification-configuration \
-        --bucket {{ s3_bucket_name }} \
-        --notification-configuration '{
-          "LambdaFunctionConfigurations":[{
-            "LambdaFunctionArn":"{{ lambda_arn }}",
-            "Events":["s3:ObjectCreated:Put"],
-            "Filter":{"Key":{"FilterRules":[{"Name":"suffix","Value":".txt"}]}}
-          }]
-        }'
+          --bucket {{ s3_bucket_name }} \
+          --notification-configuration '{
+            "LambdaFunctionConfigurations":[{
+              "LambdaFunctionArn":"{{ lambda_arn }}",
+              "Events":["s3:ObjectCreated:Put"],
+              "Filter":{"Key":{"FilterRules":[{"Name":"suffix","Value":".txt"}]}}
+            }]
+          }'
       args:
-        warn: false
         executable: /bin/bash
-      changed_when: true
+        warn: false
+      changed_when: false
