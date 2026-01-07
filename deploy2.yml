@@ -1,0 +1,111 @@
+- name: Deploy S3 → Lambda → SNS Email Automation
+  hosts: localhost
+  gather_facts: false
+
+  collections:
+    - amazon.aws
+    - community.aws
+
+  vars_files:
+    - environments/vars.yml
+
+  tasks:
+
+    # ------------------------
+    # S3 Bucket
+    # ------------------------
+    - name: Ensure S3 bucket exists
+      amazon.aws.s3_bucket:
+        name: "{{ s3_bucket_name }}"
+        region: "{{ region }}"
+        state: present
+
+    # ------------------------
+    # IAM Role
+    # ------------------------
+    - name: Ensure Lambda IAM role exists
+      amazon.aws.iam_role:
+        name: "{{ lambda_role_name }}"
+        assume_role_policy_document:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        state: present
+
+    - name: Ensure Lambda basic execution policy attached
+      amazon.aws.iam_role_policy_attachment:
+        role_name: "{{ lambda_role_name }}"
+        policy_arn: arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        state: present
+
+    # ------------------------
+    # Lambda Function
+    # ------------------------
+    - name: Create or update Lambda function
+      amazon.aws.lambda:
+        name: "{{ lambda_name }}"
+        state: present
+        runtime: python3.11
+        role: "arn:aws:iam::{{ account_id }}:role/{{ lambda_role_name }}"
+        handler: handler.lambda_handler
+        zip_file: handler.zip
+        region: "{{ region }}"
+        timeout: 60
+        memory_size: 128
+      register: lambda_result
+
+    - name: Set Lambda ARN fact
+      ansible.builtin.set_fact:
+        lambda_arn: "{{ lambda_result.function_arn }}"
+
+    # ------------------------
+    # SNS Topic
+    # ------------------------
+    - name: Ensure SNS topic exists
+      amazon.aws.sns_topic:
+        name: "{{ sns_topic_name }}"
+        region: "{{ region }}"
+        state: present
+      register: sns_result
+
+    - name: Set SNS topic ARN fact
+      ansible.builtin.set_fact:
+        sns_topic_arn: "{{ sns_result.topic_arn }}"
+
+    - name: Ensure email subscriptions exist
+      amazon.aws.sns_subscription:
+        topic_arn: "{{ sns_topic_arn }}"
+        protocol: email
+        endpoint: "{{ item }}"
+        region: "{{ region }}"
+        state: present
+      loop: "{{ email_subscriptions }}"
+
+    # ------------------------
+    # Lambda Permissions
+    # ------------------------
+    - name: Allow S3 to invoke Lambda
+      amazon.aws.lambda_permission:
+        statement_id: s3invoke
+        action: lambda:InvokeFunction
+        function_name: "{{ lambda_name }}"
+        principal: s3.amazonaws.com
+        source_arn: "arn:aws:s3:::{{ s3_bucket_name }}"
+        region: "{{ region }}"
+        state: present
+
+    # ------------------------
+    # S3 Notification
+    # ------------------------
+    - name: Configure S3 bucket notification for Lambda
+      amazon.aws.s3_bucket_notification:
+        bucket: "{{ s3_bucket_name }}"
+        lambda_notifications:
+          - lambda_function_arn: "{{ lambda_arn }}"
+            events:
+              - s3:ObjectCreated:Put
+            filter_suffix: ".txt"
+        state: present
