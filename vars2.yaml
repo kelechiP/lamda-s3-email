@@ -1,0 +1,42 @@
+# ------------------------
+# ENVIRONMENT
+# ------------------------
+env_name: ny-us-west-1
+region: us-west-1
+account_id: "123456789012"
+
+# ------------------------
+# S3
+# ------------------------
+s3_bucket_name: ny-us-west-1-s3-lambda-email
+s3_event_suffix: ".txt"
+
+# ------------------------
+# IAM
+# ------------------------
+lambda_role_name: ny-us-west-1-lambda-exec-role
+lambda_trust_policy_file: trust-policy.json
+
+# ------------------------
+# LAMBDA
+# ------------------------
+lambda_name: ny-us-west-1-s3-sns-email
+lambda_runtime: python3.11
+lambda_handler: handler.lambda_handler
+lambda_zip_name: handler.zip
+lambda_timeout: 30
+lambda_memory: 256
+
+# ------------------------
+# SNS
+# ------------------------
+sns_topic_name: ny-us-west-1-s3-email-topic
+email_subscriptions:
+  - test@example.com
+
+# ------------------------
+# LOCAL PATHS (relative to repo root)
+# ------------------------
+handler_source_file: environments/handler.py
+lambda_build_dir: build
+lambda_zip_path: build/handler.zip
