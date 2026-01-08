@@ -11,133 +11,151 @@ BUCKET = "bucketname"
 BASE_PREFIX = ""
 SNS_TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:weekly-report"
 
-
-
-# IMPORTANT: your actual folder is cadence=week (NOT cadence-week)
 CADENCE_PREFIX = ""
-
-SNS_MAX = 260000  # SNS payload safety (approx)
+SNS_MAX = 260000
 
 
 def monday_two_weeks_ago(today: datetime) -> str:
-    """Return YYYY-MM-DD for Monday two weeks ago (week cadence)."""
-    monday_this_week = today - timedelta(days=today.weekday())  # Monday 00:00-ish
-    two_weeks_ago = monday_this_week - timedelta(days=14)
-    return two_weeks_ago.strftime("%Y-%m-%d")
+    """Monday-based cadence: Monday two weeks ago."""
+    monday_this_week = today - timedelta(days=today.weekday())
+    return (monday_this_week - timedelta(days=14)).strftime("%Y-%m-%d")
 
 
 def exact_days_ago(today: datetime, days: int = 14) -> str:
-    """Return YYYY-MM-DD for exactly N days ago."""
+    """Calendar-based: exactly N days ago."""
     return (today - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 def resolve_start_date(event: Dict[str, Any]) -> str:
     """
-    Resolution order:
-      1) event["start_date"] explicit override (YYYY-MM-DD)
-      2) event["mode"] == "weekly" -> Monday two weeks ago
-      3) event["days_ago"] -> exact N days ago
-      4) default:
-            - if it's Monday (UTC) -> weekly cadence (Monday two weeks ago)
-            - else -> exact 14 days ago
+    Behavior:
+      - Scheduled Monday run (default on Monday UTC): Monday 2 weeks ago
+      - Manual run any other day (default): exactly 14 days ago
+    Overrides:
+      - {"start_date": "YYYY-MM-DD"}
+      - {"mode": "weekly"} forces Monday cadence
+      - {"days_ago": 14} forces exact N days
     """
     today = datetime.utcnow()
+    event = event or {}
 
-    if isinstance(event, dict) and event.get("start_date"):
+    if event.get("start_date"):
         return event["start_date"]
 
-    mode = (event.get("mode") if isinstance(event, dict) else None)
-
-    if mode == "weekly":
+    if event.get("mode") == "weekly":
         return monday_two_weeks_ago(today)
 
-    if isinstance(event, dict) and event.get("days_ago") is not None:
+    if event.get("days_ago") is not None:
         return exact_days_ago(today, int(event["days_ago"]))
 
-    # default behavior:
-    if today.weekday() == 0:  # Monday in UTC
+    # default behavior
+    if today.weekday() == 0:  # Monday (UTC)
         return monday_two_weeks_ago(today)
 
     return exact_days_ago(today, 14)
 
 
 def lambda_handler(event, context):
-    event = event or {}
-    start_date = resolve_start_date(event)
+    start_date = resolve_start_date(event or {})
     print(f"[INFO] Using start_date={start_date}")
-    print(f"[INFO] BASE_PREFIX={BASE_PREFIX}")
 
-    agencies = list_agency_folders()
+    agencies = list_child_prefixes(BASE_PREFIX)  # full prefixes
     print(f"[INFO] Found agencies={len(agencies)}")
 
-    report_sections: List[str] = []
+    sections: List[str] = []
 
-    for agency in agencies:
-        for folder in FOLDER_PATTERNS:
-            prefix = (
-                f"{BASE_PREFIX}{agency}/"
-                f"{folder}"
-                f"{CADENCE_PREFIX}start_date={start_date}/"
-            )
+    for agency_prefix in agencies:
+        agency_name = agency_prefix.rstrip("/").split("/")[-1]  # e.g., agency=wholesales
+        print(f"[INFO] Agency={agency_name}")
 
-            print(f"[DEBUG] Checking prefix: {prefix}")
+        # bypass folders (bypass-DNS_53, bypass-DoH, bypass-DoT, etc.)
+        bypass_prefixes = list_child_prefixes(agency_prefix)
+        print(f"[INFO]  bypass_prefixes={len(bypass_prefixes)}")
 
-            rows = read_csvs(prefix)
-            if rows:
-                section_header = f"\n===== {agency} | {folder} | start_date={start_date} =====\n"
-                report_sections.append(section_header + "\n".join(rows))
+        for bypass_prefix in bypass_prefixes:
+            bypass_name = bypass_prefix[len(agency_prefix):].rstrip("/")  # relative label
+            # ipv folders (ipv=IPv4, ipv=IPv6)
+            ipv_prefixes = list_child_prefixes(bypass_prefix)
 
-    if not report_sections:
+            for ipv_prefix in ipv_prefixes:
+                ipv_name = ipv_prefix[len(bypass_prefix):].rstrip("/")  # e.g., ipv=IPv4
+
+                # ip_field folders (ip_field=DIPS, ip_field=SIPS)
+                ip_field_prefixes = list_child_prefixes(ipv_prefix)
+
+                for ipf_prefix in ip_field_prefixes:
+                    ipf_name = ipf_prefix[len(ipv_prefix):].rstrip("/")  # e.g., ip_field=DIPS
+
+                    # FINAL target prefix exactly matching your example key:
+                    # .../agency=.../bypass-.../ipv=.../ip_field=.../cadence=week/start_date=YYYY-MM-DD/
+                    target_prefix = f"{ipf_prefix}{CADENCE_PREFIX}start_date={start_date}/"
+                    print(f"[DEBUG] Checking: {target_prefix}")
+
+                    rows = read_csvs(target_prefix)
+
+                    if rows:
+                        header = (
+                            f"\n===== {agency_name} | {bypass_name} | {ipv_name} | {ipf_name} "
+                            f"| start_date={start_date} =====\n"
+                        )
+                        sections.append(header + "\n".join(rows))
+
+    if not sections:
         publish_sns(
             subject=f"DNS/DoH/DoT Report (start_date={start_date})",
-            message=f"No CSV data found for start_date={start_date} under {BASE_PREFIX}"
+            message=(
+                f"No CSV data found for start_date={start_date} under {BASE_PREFIX}\n"
+                f"Tip: verify the folder exists exactly: .../{CADENCE_PREFIX}start_date={start_date}/"
+            )
         )
         return {"status": "no_data", "start_date": start_date}
 
-    full_message = "\n\n".join(report_sections)
     publish_sns_chunked(
         subject=f"DNS/DoH/DoT Report (start_date={start_date})",
-        message=full_message
+        message="\n\n".join(sections)
     )
-    return {"status": "ok", "start_date": start_date, "sections": len(report_sections)}
+    return {"status": "ok", "start_date": start_date, "sections": len(sections)}
 
 
-def list_agency_folders() -> List[str]:
+def list_child_prefixes(parent_prefix: str) -> List[str]:
     """
-    Agencies are immediate child folders under BASE_PREFIX.
-    Example agency folder: "agency=wholesales/"
-    Returns folder names without trailing slash, e.g. "agency=wholesales"
+    Lists immediate child "folders" as full prefixes using Delimiter="/".
+    Returns list like: [".../agency=wholesales/", ".../agency=foo/"]
     """
+    prefixes: List[str] = []
     paginator = s3.get_paginator("list_objects_v2")
-    agencies: List[str] = []
 
-    for page in paginator.paginate(Bucket=BUCKET, Prefix=BASE_PREFIX, Delimiter="/"):
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=parent_prefix, Delimiter="/"):
         for cp in page.get("CommonPrefixes", []):
-            # cp["Prefix"] like ".../agency=wholesales/"
-            prefix = cp["Prefix"].rstrip("/")
-            agencies.append(prefix.split("/")[-1])
+            prefixes.append(cp["Prefix"])
 
-    return agencies
+    return prefixes
 
 
 def read_csvs(prefix: str) -> List[str]:
     """
-    Reads all .csv files under the given prefix and returns their CSV rows as strings.
-    NOTE: If files are big, consider summarizing instead of returning all rows.
+    Reads all .csv files under prefix and returns their CSV rows as strings.
     """
     paginator = s3.get_paginator("list_objects_v2")
     output: List[str] = []
+    found_any = False
 
     for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
         for obj in page.get("Contents", []):
+            found_any = True
             key = obj["Key"]
             if key.lower().endswith(".csv"):
                 print(f"[INFO] Found CSV: {key}")
-                response = s3.get_object(Bucket=BUCKET, Key=key)
-                body = response["Body"].read().decode("utf-8", errors="replace")
+                body = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read().decode("utf-8", errors="replace")
                 reader = csv.reader(io.StringIO(body))
                 for row in reader:
                     output.append(", ".join(row))
+
+    if not output:
+        if not found_any:
+            print(f"[DEBUG] No objects under prefix: {prefix}")
+        else:
+            print(f"[DEBUG] Objects exist but no .csv matched under prefix: {prefix}")
 
     return output
 
@@ -158,8 +176,8 @@ def publish_sns_chunked(subject: str, message: str):
         publish_sns(subject, message)
         return
 
-    parts = []
     start = 0
+    parts: List[str] = []
     while start < len(message):
         end = min(start + SNS_MAX, len(message))
         parts.append(message[start:end])
