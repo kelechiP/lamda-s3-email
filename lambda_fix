@@ -1,0 +1,157 @@
+import boto3
+import csv
+import io
+import re
+from datetime import datetime, timedelta
+from typing import List
+
+s3 = boto3.client("s3")
+sns = boto3.client("sns")
+
+BUCKET = "bucketname"
+BASE_PREFIX = "dns-bypass-analytic/stat=reports/substat=ranked-traffic/"
+SNS_TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:weekly-report"
+
+SNS_MAX = 260000  # safe limit under SNS max payload
+
+
+def get_target_start_date(event: dict) -> str:
+    """
+    Default: exactly 14 days ago from *run time* (UTC) in YYYY-MM-DD.
+    Optional manual override:
+      - event["start_date"] = "YYYY-MM-DD"
+      - event["days_ago"] = 14
+    """
+    if isinstance(event, dict):
+        if event.get("start_date"):
+            return event["start_date"]
+        if event.get("days_ago") is not None:
+            return (datetime.utcnow() - timedelta(days=int(event["days_ago"]))).strftime("%Y-%m-%d")
+
+    return (datetime.utcnow() - timedelta(days=14)).strftime("%Y-%m-%d")
+
+
+def lambda_handler(event, context):
+    start_date = get_target_start_date(event or {})
+    print(f"[INFO] Using start_date={start_date}")
+
+    agencies = list_child_prefix_names(BASE_PREFIX)
+    print(f"[INFO] Found agencies: {len(agencies)}")
+
+    report_sections: List[str] = []
+
+    for agency in agencies:
+        agency_prefix = f"{BASE_PREFIX}{agency}/"
+        bypass_prefixes = list_child_prefixes(agency_prefix)  # returns full prefixes
+
+        print(f"[INFO] Agency={agency} bypass_prefixes={len(bypass_prefixes)}")
+
+        for bp in bypass_prefixes:
+            # bp is like: BASE/agency/<bypass...>/
+            target_prefix = f"{bp}cadence-week/start_date={start_date}/"
+            rows = read_csvs(target_prefix)
+
+            if rows:
+                # Make a nice label for the section (agency + bypass folder)
+                bypass_label = bp[len(agency_prefix):].rstrip("/")  # remove base/agency/
+                section_header = f"\n===== {agency} | {bypass_label} | start_date={start_date} =====\n"
+                report_sections.append(section_header + "\n".join(rows))
+            else:
+                # Helpful debug (comment out if too noisy)
+                print(f"[DEBUG] No CSVs under: {target_prefix}")
+
+    if not report_sections:
+        publish_sns(f"No CSV data found for start_date={start_date} under {BASE_PREFIX}")
+        return {"status": "no_data", "start_date": start_date}
+
+    # Publish with chunking if message is too large
+    full_message = "\n\n".join(report_sections)
+    publish_sns_chunked(
+        subject=f"DNS/DoH/DoT Report (start_date={start_date})",
+        message=full_message
+    )
+    return {"status": "ok", "start_date": start_date, "sections": len(report_sections)}
+
+
+def list_child_prefix_names(parent_prefix: str) -> List[str]:
+    """
+    Lists immediate child folders under parent_prefix and returns their folder names only.
+    Example: parent_prefix=BASE_PREFIX -> returns ["agency1", "agency2", ...]
+    """
+    names = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=parent_prefix, Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            full = cp["Prefix"].rstrip("/")              # e.g. ".../agency1"
+            names.append(full.split("/")[-1])           # "agency1"
+    return names
+
+
+def list_child_prefixes(parent_prefix: str) -> List[str]:
+    """
+    Lists immediate child prefixes (full prefix strings) under parent_prefix.
+    Example: parent_prefix=BASE/agency/ -> returns ["BASE/agency/bypass=.../", ...]
+    """
+    prefixes = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=parent_prefix, Delimiter="/"):
+        for cp in page.get("CommonPrefixes", []):
+            prefixes.append(cp["Prefix"])
+    return prefixes
+
+
+def read_csvs(prefix: str) -> List[str]:
+    """
+    Reads all .csv and .csv.gz objects under prefix and returns lines as strings.
+    (If your files are large, you probably want summary aggregation instead.)
+    """
+    paginator = s3.get_paginator("list_objects_v2")
+    output = []
+
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.lower().endswith(".csv"):
+                print(f"[INFO] Found CSV: {key}")
+                body = s3.get_object(Bucket=BUCKET, Key=key)["Body"].read().decode("utf-8", errors="replace")
+                reader = csv.reader(io.StringIO(body))
+                for row in reader:
+                    output.append(", ".join(row))
+
+            # If you might have .csv.gz, uncomment and add gzip handling
+            # elif key.lower().endswith(".csv.gz"):
+            #     ...
+
+    return output
+
+
+def publish_sns(message: str, subject: str = "Weekly DNS/DoH/DoT Report"):
+    sns.publish(
+        TopicArn=SNS_TOPIC_ARN,
+        Subject=subject,
+        Message=message[:SNS_MAX]
+    )
+
+
+def publish_sns_chunked(subject: str, message: str):
+    """
+    SNS messages have a size limit. If your consolidated report is huge,
+    this splits into multiple SNS publishes.
+    """
+    if len(message) <= SNS_MAX:
+        publish_sns(message, subject=subject)
+        return
+
+    chunks = []
+    start = 0
+    while start < len(message):
+        end = min(start + SNS_MAX, len(message))
+        chunks.append(message[start:end])
+        start = end
+
+    for i, chunk in enumerate(chunks, start=1):
+        sns.publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Subject=f"{subject} (part {i}/{len(chunks)})",
+            Message=chunk
+        )
