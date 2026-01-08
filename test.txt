@@ -1,0 +1,24 @@
+if not agency_reports:
+    publish_sns(
+        subject=f"DNS Bypass Weekly Report (start_date={start_date})",
+        message=(
+            f"No CSV data found for start_date={start_date} under {BASE_PREFIX}\n"
+            f"Tip: verify the folder exists exactly: .../{CADENCE_PREFIX}start_date={start_date}/"
+        )
+    )
+    return {"status": "no_data", "start_date": start_date}
+
+# Publish one SNS notification per agency, formatted as requested
+published = 0
+for agency_name, report_blocks in agency_reports.items():
+    message = (
+        f"DNS Bypass Weekly Report {start_date} {agency_name}\n\n"
+        + "".join(report_blocks)
+    )
+    publish_sns_chunked(
+        subject=f"DNS Bypass Weekly Report - {agency_name}",
+        message=message
+    )
+    published += 1
+
+return {"status": "ok", "start_date": start_date, "agencies_published": published}
