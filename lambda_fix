@@ -9,7 +9,7 @@ s3 = boto3.client("s3")
 sns = boto3.client("sns")
 
 BUCKET = "bucketname"
-BASE_PREFIX = "dns-bypass-analytic/stat=reports/substat=ranked-traffic/"
+BASE_PREFIX = ""
 SNS_TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:weekly-report"
 
 SNS_MAX = 260000  # safe limit under SNS max payload
