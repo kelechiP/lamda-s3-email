@@ -1,135 +1,127 @@
-Weekly Report – Lambda
+# DNS Service Bypass Weekly Report – AWS Lambda
 
-Overview
+## Overview
 
-This AWS Lambda function generates weekly DNS/DoH/DoT bypass reports by:
+This AWS Lambda function generates **weekly DNS / DoH / DoT bypass reports** by:
 
-Iterating through a deeply nested S3 folder structure
+- Traversing a deeply nested **Amazon S3 folder structure**
+- Collecting **CSV files** for a computed reporting date
+- Grouping data **by agency**
+- Sending **one email per agency**
+- Attaching **only CSV files** (no inline CSV rows)
+- Sending emails via **SMTP with failover**
+- Supporting **TEST mode vs PROD mode**
+- Running automatically **every Monday at 7:00am Eastern Time**
 
-Collecting CSV files for a calculated start_date
+---
 
-Grouping CSV files per agency
+## What the Lambda Does
 
-Sending one email per agency via SMTP
+1. **Determines the report start date**
+   - Scheduled Monday run → **Monday two weeks ago**
+   - Manual run → **Exactly 14 days ago**
+   - Supports overrides via event input
 
-Attaching all CSV files for that agency
-
-Sending emails BCC to agency distribution lists
-
-Supporting TEST mode vs PROD mode
-
-Running automatically every Monday at 7:00am Eastern Time (via EventBridge)
-
-What the Lambda Does (High Level)
-
-Determines the start_date
-
-Scheduled Monday run → Monday two weeks ago
-
-Manual run → Exactly 14 days ago
-
-Optional overrides via event input
-
-Walks this S3 structure:
+2. **Traverses this S3 structure**
 
 s3://<bucket>/
 └── dns-bypass-analytic/
-    └── stat=reports/
-        └── substat=ranked-traffic/
-            └── agency=<agency-name>/
-                └── bypass-*/
-                    └── ipv=*/
-                        └── ip_field=*/
-                            └── cadence=week/
-                                └── start_date=YYYY-MM-DD/
-                                    └── *.csv
+└── stat=reports/
+└── substat=ranked-traffic/
+└── agency=<agency-name>/
+└── bypass-/
+└── ipv=/
+└── ip_field=*/
+└── cadence=week/
+└── start_date=YYYY-MM-DD/
+└── *.csv
 
 
-For each agency:
+3. **Per agency**
+   - Collects all CSV files for the resolved `start_date`
+   - Builds **one email**
+   - Attaches **all CSVs for that agency**
+   - Sends email using SMTP
 
-Collects all CSV files under the resolved start_date
+---
 
-Builds one email
+## Email Format
 
-Attaches only CSV files (no inline data)
-
-Sends email using SMTP
-
-Email Behavior
-Headers
-
-FROM: MAIL_FROM
-
-TO: Same as sender (MAIL_FROM)
-
-BCC: Agency distribution list
-
-SUBJECT:
+### Headers
+- **FROM:** `MAIL_FROM`
+- **TO:** Same as sender (`MAIL_FROM`)
+- **BCC:** Agency distribution list
+- **SUBJECT:**
 
 DNS Service Bypass Weekly Report <agency-name>
 
+(`agency=` prefix is removed automatically)
 
-(agency= prefix is automatically removed)
+### Body (no CSV rows)
 
-Body (no CSV rows shown)
 BODY of EMAIL:
 For questions about this report, please reply to this message or e-mail <MAIL_FROM>.
-DISCLAIMER: <custom disclaimer>
+DISCLAIMER: <custom disclaimer text>
 
-Attachments
 
-All .csv files found for that agency and start_date
+### Attachments
+- All `.csv` files for the agency and reporting date
 
-TEST MODE vs PROD MODE
+---
 
-The Lambda supports safe testing in production.
+## TEST MODE vs PROD MODE
 
-Environment Variables Used
+The Lambda supports **safe testing in production**.
 
-AGENCY_EMAIL_MAP → real production distribution lists
+### Environment Variables Used
+- `AGENCY_EMAIL_MAP` → real production distribution lists
+- `TEST_EMAIL_MAP` → test distribution lists
+- `TEST_MODE` → toggle
 
-TEST_EMAIL_MAP → test distribution lists
+### Behavior
 
-TEST_MODE → controls which map is used
+| TEST_MODE | Recipient Source |
+|---------|------------------|
+| `true`  | `TEST_EMAIL_MAP` |
+| `false` | `AGENCY_EMAIL_MAP` |
 
-How It Works
-TEST_MODE	Email Recipients
-true	Uses TEST_EMAIL_MAP
-false	Uses AGENCY_EMAIL_MAP
+If an agency is **not found** in the selected map, the email is sent to `DEFAULT_EMAIL_TO`.
 
-If an agency is not found in the selected map:
+### Recommended Workflow
 
-Email is sent to DEFAULT_EMAIL_TO
-
-Typical Workflow
-
-Deploy Lambda to prod
-
-Set:
+1. Deploy Lambda to production
+2. Set:
 
 TEST_MODE=true
 
+3. Run Lambda manually and validate output
+4. Switch to:
 
-Run Lambda manually and verify output
-
-Flip:
 
 TEST_MODE=false
 
-
-Scheduled runs now go to real distribution lists
+5. Scheduled runs now go to real recipients
 
 No code changes required.
 
-Required Environment Variables
-SMTP (Required)
+---
+
+## Required Environment Variables
+
+### SMTP (Required)
+
+
+
 MAIL_FROM=dns-bypass-reports@example.mil
+
 SMTP_HOST_1=smtp1.example.mil
 SMTP_PORT=587
 SMTP_MODE=starttls
 
 
-If SMTP authentication is required:
+If authentication is required:
+
+
 
 SMTP_USER=<username>
 SMTP_PASS=<password>
@@ -137,137 +129,153 @@ SMTP_PASS=<password>
 
 Optional SMTP failover:
 
+
+
 SMTP_HOST_2=smtp2.example.mil
 
-Email Routing
-Production distribution lists
+
+---
+
+### Email Routing
+
+#### Production Distribution Lists
+
+
+
 AGENCY_EMAIL_MAP={
-  "agency=wholesales": ["dl-wholesales@example.mil"],
-  "agency=retail": ["dl-retail@example.mil"]
+"agency=wholesales": ["dl-wholesales@example.mil
+"],
+"agency=retail": ["dl-retail@example.mil
+"]
 }
 
-Test distribution lists
+
+#### Test Distribution Lists
+
+
+
 TEST_EMAIL_MAP={
-  "agency=wholesales": ["test-user@example.mil"],
-  "agency=retail": ["test-user@example.mil"]
+"agency=wholesales": ["test-user@example.mil
+"],
+"agency=retail": ["test-user@example.mil
+"]
 }
 
-Toggle
-TEST_MODE=true   # or false
 
-Default fallback recipient
+#### Toggle
+
+
+
+TEST_MODE=true # or false
+
+
+#### Default Fallback Recipient
+
+
+
 DEFAULT_EMAIL_TO=ops@example.mil
 
-Optional Content Customization
+
+---
+
+### Optional Customization
+
+
+
 DISCLAIMER_TEXT=This report is confidential and intended for authorized recipients only.
 
-IAM Permissions Required
 
-Lambda execution role must allow:
+---
 
-S3
+## IAM Permissions Required
+
+Lambda execution role must include:
+
+### S3
+
+
 s3:ListBucket
 s3:GetObject
 
-(No SNS required – SMTP is used)
-EventBridge (CloudWatch Events) Setup
 
-Runs every Monday at 7:00am Eastern Time
+(No SNS permissions required — SMTP is used.)
 
-⚠️ CloudWatch Events cron schedules are UTC only and do not auto-handle DST.
+---
 
-Cron Expressions
+## EventBridge (CloudWatch Events) Setup  
+**Every Monday at 7:00am Eastern Time**
 
-7:00am EST (winter):
+> ⚠️ CloudWatch Events schedules use **UTC only** and do **not handle DST automatically**.
+
+### Cron Expressions
+
+- **7:00am EST (winter):**
+
 
 cron(0 12 ? * MON *)
 
 
-7:00am EDT (summer):
+- **7:00am EDT (summer):**
+
 
 cron(0 11 ? * MON *)
 
-Recommended Practice
 
-Use one rule
+### Console Steps
 
-Update the hour twice per year for DST
-OR
+1. Open **Amazon EventBridge**
+2. Go to **Rules**
+3. Click **Create rule**
+4. Rule type: **Schedule**
+5. Schedule pattern: **Cron**
+6. Enter cron expression (above)
+7. Target:
+   - AWS service → **Lambda function**
+8. (Optional) Constant JSON input:
+   ```json
+   { "mode": "weekly" }
+9. Create rule
 
-Accept a 1-hour shift during DST
-OR
+## Manual Testing
+### Example Test Event
 
-Migrate to EventBridge Scheduler (supports time zones automatically)
-
-Console Steps (CloudWatch Events)
-
-Open Amazon EventBridge
-
-Go to Rules
-
-Click Create rule
-
-Rule type: Schedule
-
-Schedule pattern: Cron
-
-Enter cron expression (see above)
-
-Target:
-
-AWS service → Lambda function
-
-Select this Lambda
-
-(Optional) Constant JSON input:
-
-{ "mode": "weekly" }
-
-
-Create rule
-
-Manual Testing
-Example test event (manual run)
 {
   "start_date": "2025-12-25",
   "test_mode": true
 }
 
-
-Or:
+### Or:
 
 {
   "days_ago": 14
 }
 
-Failure Handling
+## Failure Handling
 
-SMTP primary host failure → automatic retry on SMTP_HOST_2
+- SMTP primary failure → automatic retry on secondary host
 
-Agency with no email mapping → falls back to DEFAULT_EMAIL_TO
+- Missing agency email mapping → fallback to DEFAULT_EMAIL_TO
 
-No CSVs found → no agency email sent (optional fallback email can be added)
+- No CSV files → no agency email sent (optional fallback email can be added)
 
-Operational Notes
+## Operational Notes
 
-CSV attachment size depends on SMTP server limits (usually 10–25MB)
+- SMTP servers usually limit attachments to 10–25 MB
 
-If CSV volume grows, recommended enhancement:
+- If CSV volume grows, recommended enhancements:
+    - Zip CSVs per agency
+    - Upload zip to S3 and email a presigned URL
 
-Zip attachments per agency
-
-Or upload consolidated zip to S3 and email link
-
-Summary
+## Summary
 
 This Lambda provides:
 
-Automated weekly reporting
+- Automated weekly reporting
 
-Safe testing in production
+- Safe test-first execution in production
 
-Agency-specific email routing
+- Agency-specific email routing
 
-SMTP failover
+- SMTP failover
 
-Clean separation of logic and configuration
+- Clean separation of logic and configuration
