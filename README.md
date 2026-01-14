@@ -25,16 +25,16 @@ This AWS Lambda function generates **weekly DNS / DoH / DoT bypass reports** by:
 2. **Traverses this S3 structure**
 
 s3://<bucket>/
-└── dns-bypass-analytic/
-└── stat=reports/
-└── substat=ranked-traffic/
-└── agency=<agency-name>/
-└── bypass-/
-└── ipv=/
-└── ip_field=*/
-└── cadence=week/
-└── start_date=YYYY-MM-DD/
-└── *.csv
+└── dns-bypass-/
+    └── stat=rep/
+        └── substat=ra-tr/
+            └── agency=<agency-name>/
+                └── bp-/
+                    └── ipv=*/
+                        └── ip_field=*/
+                            └── c=k/
+                                └── start_date=YYYY-MM-DD/
+                                    └── *.csv
 
 
 3. **Per agency**
