@@ -1,4 +1,4 @@
-# DNS Service Bypass Weekly Report – AWS Lambda
+# Weekly Report – AWS Lambda
 
 ## Overview
 
