@@ -1,5 +1,13 @@
+# =========================
+# Load JSON config from S3 via ENV var
+# =========================
 def load_json_from_s3_env(env_var_name: str, default=None):
+    """
+    Reads an s3://bucket/key.json from an environment variable.
+    If the env var is missing, returns default.
+    """
     uri = os.getenv(env_var_name)
+
     if not uri:
         print(f"[WARN] {env_var_name} not set; using default")
         return default if default is not None else {}
@@ -12,9 +20,3 @@ def load_json_from_s3_env(env_var_name: str, default=None):
 
     obj = s3.get_object(Bucket=bucket, Key=key)
     return json.loads(obj["Body"].read())
-
-
-AGENCY_EMAIL_MAP_S3 = s3://<bucket>/<path>/agency_email_map.json
-
-
-AGENCY_EMAIL_MAP = load_json_from_s3_env("AGENCY_EMAIL_MAP_S3", default={})
