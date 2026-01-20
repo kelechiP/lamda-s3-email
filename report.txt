@@ -1,0 +1,92 @@
+Current Weekly Reporting Logic (Updated)
+
+Uses one start_date, resolved as:
+
+Monday two weeks ago when the job runs on Monday (UTC)
+
+Exactly 14 days ago when run manually on any other day
+
+Reads two parallel S3 directory trees in the same bucket, using the same start_date:
+
+ranked-traffic (BASE_PREFIX_RANKED)
+
+Locates .csv files
+
+These CSVs are attached to the agency’s email
+
+summary (BASE_PREFIX_SUMMARY)
+
+Locates .txt files (not CSV)
+
+The text content of these files is added to the email body
+
+Appears under a “SUMMARY REPORTS” section
+
+Agency discovery
+
+Agencies are discovered by listing folders under ranked-traffic
+
+The corresponding summary path is derived automatically and assumed to have the same structure
+
+Per-Agency Processing
+
+For each agency:
+
+Ranked-traffic
+
+Collects .csv files and prepares them as email attachments
+
+If no ranked CSVs are found → agency is added to agencies_no_ranked
+
+Summary
+
+Collects .txt files and reads their text content
+
+Content is appended to the email body
+
+If no summary TXT files are found → agency is added to agencies_no_summary
+
+Email Routing Rules
+
+TO: always MAIL_FROM
+
+BCC: determined per agency
+
+TEST_MODE=true → uses TEST_EMAIL_MAP (environment JSON)
+
+TEST_MODE=false → uses AGENCY_EMAIL_MAP loaded from S3 (bucket/key)
+
+If no mapping exists → falls back to DEFAULT_EMAIL_TO (if set)
+
+Emails Sent
+1) REPORT Emails (per agency)
+
+Sent only for agencies that have at least one ranked-traffic CSV.
+
+Attachments: ranked-traffic .csv files
+
+Body:
+
+“SUMMARY REPORTS” section (summary .txt content, if present)
+
+Footer (questions + disclaimer)
+
+2) NO DATA – ALL AGENCIES
+
+Sent only if no agency has any ranked-traffic CSVs (i.e., zero report emails sent).
+
+Sent to DEFAULT_EMAIL_TO (BCC), if set
+
+No per-agency NO DATA email is sent in this case
+
+3) NO DATA – PER AGENCY LIST
+
+Sent only if at least one agency is missing ranked-traffic CSVs and it is not the “all agencies no data” case.
+
+Sent to DEFAULT_EMAIL_TO (BCC), if set
+
+Email body includes:
+
+A paragraph listing agencies missing ranked-traffic CSVs (attachments)
+
+A separate paragraph listing agencies missing summary TXT files (body content)
