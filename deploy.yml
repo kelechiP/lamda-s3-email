@@ -1,0 +1,83 @@
+---
+- name: Deploy DNS Bypass Lambda + EventBridge schedule
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Path format you requested (note: using var.yaml, not values.yml)
+    values_file: "./environments/{{ targetAccountAlias }}--{{ targetAccountRegion }}/var.yaml"
+
+  tasks:
+    - name: Load environment variables file
+      ansible.builtin.include_vars:
+        file: "{{ values_file }}"
+      tags: [everything]
+
+    - name: Show selected environment and region
+      ansible.builtin.debug:
+        msg:
+          - "values_file={{ values_file }}"
+          - "deployState={{ deployState }}"
+          - "awsRegion={{ awsRegion }}"
+          - "dnsBypassLambdaName={{ dnsBypassLambdaName }}"
+      tags: [everything]
+
+    # ----------------------------
+    # Lambda deployment
+    # ----------------------------
+    - name: Deploy/Update DNS Bypass Lambda function
+      amazon.aws.lambda:
+        name: "{{ dnsBypassLambdaName }}"
+        state: "{{ deployState }}"              # present|absent
+        region: "{{ awsRegion }}"
+        role: "{{ iamRoleArn }}"
+        runtime: "{{ runtimeEnv }}"
+        handler: "{{ dnsBypassLambdaHandler }}"
+        timeout: "{{ funcTimeout | int }}"
+        memory_size: "{{ funcMemory | int }}"
+        zip_file: "{{ dnsBypassZipFile }}"
+        description: "{{ dnsBypassLambdaDescription }}"
+        environment_variables: "{{ dnsBypassEnvVars }}"
+        publish: true
+
+        # Optional VPC config (only applied when enabled)
+        vpc_subnet_ids: "{{ vpcSubnetIds | default(omit) }}"
+        vpc_security_group_ids: "{{ vpcSecurityGroupIds | default(omit) }}"
+      when: deployState in ["present", "absent"]
+      tags: [everything]
+
+    # ----------------------------
+    # EventBridge Rule (schedule)
+    # ----------------------------
+    - name: Ensure EventBridge schedule rule exists
+      amazon.aws.cloudwatch_event_rule:
+        name: "{{ dnsBypassEventName }}"
+        region: "{{ awsRegion }}"
+        state: "{{ deployState }}"
+        schedule_expression: "{{ scheduleExpr }}"
+        description: "{{ dnsBypassEventDescription }}"
+      tags: [everything]
+
+    - name: Attach Lambda as EventBridge target
+      amazon.aws.cloudwatch_event_target:
+        rule: "{{ dnsBypassEventName }}"
+        region: "{{ awsRegion }}"
+        state: "{{ deployState }}"
+        targets:
+          - id: "{{ dnsBypassEventTargetId }}"
+            arn: "{{ dnsBypassLambdaFuncArn }}"
+            # Optional: pass input to lambda (e.g., override start_date / days_ago)
+            # input: "{{ dnsBypassEventInput | default(omit) }}"
+      tags: [everything]
+
+    - name: Allow EventBridge to invoke Lambda
+      amazon.aws.lambda_permission:
+        state: "{{ deployState }}"
+        region: "{{ awsRegion }}"
+        function_name: "{{ dnsBypassLambdaName }}"
+        statement_id: "{{ dnsBypassStatementId }}"
+        action: "lambda:InvokeFunction"
+        principal: "events.amazonaws.com"
+        source_arn: "{{ dnsBypassSourceEventArn }}"
+      tags: [everything]
