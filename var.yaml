@@ -1,0 +1,75 @@
+# =========================
+# Deployment controls
+# =========================
+deployState: present
+awsRegion: us-west-1
+
+# =========================
+# Lambda Function
+# =========================
+dnsBypassLambdaName: NY-dns-bypass-weekly
+dnsBypassLambdaDescription: "DNS bypass weekly reporting Lambda (ranked CSV attachments + summary TXT body)"
+runtimeEnv: python3.12
+iamRoleArn: arn:aws:iam::123456789012:role/NY-Lambda-ExecutionRole
+dnsBypassLambdaHandler: dns-bypass.lambda_handler
+funcTimeout: 300
+funcMemory: 512
+
+# Path to the ZIP already built/committed in repo
+dnsBypassZipFile: "./dns-bypass.zip"
+
+# Lambda env vars (from your current logic)
+dnsBypassEnvVars:
+  BUCKET: "bucketname"
+  BASE_PREFIX_RANKED: "dns-bypass-analytic/stat=reports/substat=ranked-traffic/"
+  BASE_PREFIX_SUMMARY: "dns-bypass-analytic/stat=reports/substat=summary/"
+  CADENCE_PREFIX: "cadence=week/"
+
+  # Email list mapping source (prod path)
+  AGENCY_EMAIL_LIST_BUCKET: "ds-analytics-output-prd"
+  AGENCY_EMAIL_LIST_KEY: "dns-bypass/stat=delivery-list/prod_emails.json"
+
+  # SMTP settings
+  SMTP_HOST_1: "smtp1.company.com"
+  SMTP_HOST_2: "smtp2.company.com"
+  SMTP_PORT: "587"
+  SMTP_MODE: "starttls"
+  SMTP_USER: "smtp-user"
+  SMTP_PASS: "{{ vault_smtp_pass | default('REPLACE_WITH_SECRET_HANDLING') }}"
+  MAIL_FROM: "dns-bypass-reports@company.com"
+
+  # Behavior flags
+  TEST_MODE: "false"
+  DEFAULT_EMAIL_TO: "dl-default1@company.com,dl-default2@company.com"
+  DISCLAIMER_TEXT: "This report is generated automatically and is for informational purposes only."
+
+  # Optional test override date (only honored when TEST_MODE=true)
+  # TEST_START_DATE: "2025-12-27"
+
+# =========================
+# Optional VPC config
+# =========================
+enableVpcConfig: true
+vpcSubnetIds:
+  - subnet-aaaa1111
+  - subnet-bbbb2222
+vpcSecurityGroupIds:
+  - sg-cccc3333
+
+# =========================
+# EventBridge schedule
+# =========================
+dnsBypassEventName: NY-dns-bypass-weekly-event
+dnsBypassEventTargetId: NY-dns-bypass-target
+dnsBypassEventDescription: "Run DNS bypass report every Monday at 7:00am"
+# Monday 7:00am (local) varies by timezone. EventBridge cron is UTC.
+# Example below: 12:00 UTC = 7:00am America/New_York during standard time.
+# Adjust per account/timezone needs.
+scheduleExpr: "cron(0 12 ? * MON *)"
+
+# Lambda ARN is account/region specific; set per environment
+dnsBypassLambdaFuncArn: "arn:aws:lambda:us-west-1:123456789012:function:NY-dns-bypass-weekly"
+
+# Permission for EventBridge -> Lambda
+dnsBypassStatementId: "NY-dns-bypass-weekly-rule"
+dnsBypassSourceEventArn: "arn:aws:events:us-west-1:123456789012:rule/NY-dns-bypass-weekly-event"
